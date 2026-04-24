@@ -73,6 +73,11 @@ from .constants import (
     SYS_DISK_SECTOR_COUNT,
     SYS_DISK_SIZE_BYTES,
     SYS_DISK_WRITE_SECTOR,
+    SYS_NET_AVAILABLE,
+    SYS_NET_IPV4_ADDR,
+    SYS_NET_PING,
+    SYS_NET_UDP_RECV,
+    SYS_NET_UDP_SEND,
     SYS_GETPID,
     SYS_KERNEL_VERSION,
     SYS_KBD_BUFFERED,
@@ -776,6 +781,16 @@ class CLeonOSWineNative:
             if sector_data is None:
                 return 0
             return 1 if self._disk_write_sector_raw(int(arg0), sector_data) else 0
+        if sid == SYS_NET_AVAILABLE:
+            return 0
+        if sid == SYS_NET_IPV4_ADDR:
+            return 0
+        if sid == SYS_NET_PING:
+            return 0
+        if sid == SYS_NET_UDP_SEND:
+            return 0
+        if sid == SYS_NET_UDP_RECV:
+            return 0
 
         return u64_neg1()
 
