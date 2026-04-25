@@ -128,6 +128,8 @@ SYS_WM_PRESENT = 110
 SYS_WM_POLL_EVENT = 111
 SYS_WM_MOVE = 112
 SYS_WM_SET_FOCUS = 113
+SYS_WM_SET_FLAGS = 114
+SYS_WM_RESIZE = 115
 
 # proc states (from cleonos/c/include/cleonos_syscall.h)
 PROC_STATE_UNUSED = 0
