@@ -86,6 +86,12 @@ from .constants import (
     SYS_NET_UDP_RECV,
     SYS_NET_UDP_SEND,
     SYS_MOUSE_STATE,
+    SYS_WM_CREATE,
+    SYS_WM_DESTROY,
+    SYS_WM_PRESENT,
+    SYS_WM_POLL_EVENT,
+    SYS_WM_MOVE,
+    SYS_WM_SET_FOCUS,
     SYS_GETPID,
     SYS_KERNEL_VERSION,
     SYS_KBD_BUFFERED,
@@ -825,6 +831,18 @@ class CLeonOSWineNative:
             return 0
         if sid == SYS_MOUSE_STATE:
             return self._mouse_state(uc, arg0)
+        if sid == SYS_WM_CREATE:
+            return 0
+        if sid == SYS_WM_DESTROY:
+            return 0
+        if sid == SYS_WM_PRESENT:
+            return 0
+        if sid == SYS_WM_POLL_EVENT:
+            return 0
+        if sid == SYS_WM_MOVE:
+            return 0
+        if sid == SYS_WM_SET_FOCUS:
+            return 0
 
         return u64_neg1()
 
