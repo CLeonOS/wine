@@ -85,6 +85,7 @@ from .constants import (
     SYS_NET_TCP_SEND,
     SYS_NET_UDP_RECV,
     SYS_NET_UDP_SEND,
+    SYS_MOUSE_STATE,
     SYS_GETPID,
     SYS_KERNEL_VERSION,
     SYS_KBD_BUFFERED,
@@ -294,6 +295,11 @@ class CLeonOSWineNative:
         self._fb_window_failed = False
         self._fb_dirty = False
         self._fb_presented_once = False
+        self.state.mouse_x = self._fb_width // 2
+        self.state.mouse_y = self._fb_height // 2
+        self.state.mouse_buttons = 0
+        self.state.mouse_packet_count = 0
+        self.state.mouse_ready = 0
 
         self._disk_present = True
         self._disk_size_bytes = self._bounded_env_int("CLEONOS_WINE_DISK_SIZE_MB", 64, 8, 4096) * 1024 * 1024
@@ -375,6 +381,9 @@ class CLeonOSWineNative:
 
         if self._fb_window is None:
             self._fb_window_failed = True
+            self.state.mouse_ready = 0
+        else:
+            self.state.mouse_ready = 1
 
     def _fb_poll_window(self) -> None:
         self._ensure_fb_window()
@@ -382,6 +391,7 @@ class CLeonOSWineNative:
             self._fb_window.pump_input(self.state)
             if self._fb_window.is_closed():
                 self._fb_window = None
+                self.state.mouse_ready = 0
 
     def _fb_present(self, *, force: bool = False) -> None:
         self._ensure_fb_window()
@@ -396,6 +406,7 @@ class CLeonOSWineNative:
 
         if self._fb_window.is_closed():
             self._fb_window = None
+            self.state.mouse_ready = 0
 
     def _fb_mark_dirty(self) -> None:
         self._fb_dirty = True
@@ -812,6 +823,8 @@ class CLeonOSWineNative:
             return 0
         if sid == SYS_NET_TCP_CLOSE:
             return 0
+        if sid == SYS_MOUSE_STATE:
+            return self._mouse_state(uc, arg0)
 
         return u64_neg1()
 
@@ -2276,6 +2289,19 @@ class CLeonOSWineNative:
         self._fb_mark_dirty()
 
         return 1
+
+    def _mouse_state(self, uc: Uc, out_ptr: int) -> int:
+        x = int(getattr(self.state, "mouse_x", self._fb_width // 2))
+        y = int(getattr(self.state, "mouse_y", self._fb_height // 2))
+        buttons = int(getattr(self.state, "mouse_buttons", 0))
+        packet_count = int(getattr(self.state, "mouse_packet_count", 0))
+        ready = int(getattr(self.state, "mouse_ready", 0))
+
+        if out_ptr == 0:
+            return 0
+
+        payload = struct.pack("<QQQQQ", u64(x), u64(y), u64(buttons), u64(packet_count), u64(ready))
+        return 1 if self._write_guest_bytes(uc, int(out_ptr), payload) else 0
 
     @staticmethod
     def _truncate_item_text(text: str, max_bytes: int = EXEC_ITEM_MAX) -> str:

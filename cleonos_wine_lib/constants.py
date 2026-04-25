@@ -121,6 +121,7 @@ SYS_NET_TCP_CONNECT = 103
 SYS_NET_TCP_SEND = 104
 SYS_NET_TCP_RECV = 105
 SYS_NET_TCP_CLOSE = 106
+SYS_MOUSE_STATE = 107
 
 # proc states (from cleonos/c/include/cleonos_syscall.h)
 PROC_STATE_UNUSED = 0
