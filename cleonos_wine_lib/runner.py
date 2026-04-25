@@ -79,6 +79,10 @@ from .constants import (
     SYS_NET_IPV4_ADDR,
     SYS_NET_NETMASK,
     SYS_NET_PING,
+    SYS_NET_TCP_CLOSE,
+    SYS_NET_TCP_CONNECT,
+    SYS_NET_TCP_RECV,
+    SYS_NET_TCP_SEND,
     SYS_NET_UDP_RECV,
     SYS_NET_UDP_SEND,
     SYS_GETPID,
@@ -799,6 +803,14 @@ class CLeonOSWineNative:
         if sid == SYS_NET_UDP_SEND:
             return 0
         if sid == SYS_NET_UDP_RECV:
+            return 0
+        if sid == SYS_NET_TCP_CONNECT:
+            return 0
+        if sid == SYS_NET_TCP_SEND:
+            return 0
+        if sid == SYS_NET_TCP_RECV:
+            return 0
+        if sid == SYS_NET_TCP_CLOSE:
             return 0
 
         return u64_neg1()
