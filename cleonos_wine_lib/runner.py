@@ -74,7 +74,10 @@ from .constants import (
     SYS_DISK_SIZE_BYTES,
     SYS_DISK_WRITE_SECTOR,
     SYS_NET_AVAILABLE,
+    SYS_NET_DNS_SERVER,
+    SYS_NET_GATEWAY,
     SYS_NET_IPV4_ADDR,
+    SYS_NET_NETMASK,
     SYS_NET_PING,
     SYS_NET_UDP_RECV,
     SYS_NET_UDP_SEND,
@@ -784,6 +787,12 @@ class CLeonOSWineNative:
         if sid == SYS_NET_AVAILABLE:
             return 0
         if sid == SYS_NET_IPV4_ADDR:
+            return 0
+        if sid == SYS_NET_NETMASK:
+            return 0
+        if sid == SYS_NET_GATEWAY:
+            return 0
+        if sid == SYS_NET_DNS_SERVER:
             return 0
         if sid == SYS_NET_PING:
             return 0
