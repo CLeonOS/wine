@@ -119,6 +119,7 @@ from .constants import (
     SYS_PROC_LAST_SIGNAL,
     SYS_PROC_PID_AT,
     SYS_PROC_SNAPSHOT,
+    SYS_PTY_OPEN,
     SYS_RESTART,
     SYS_SERVICE_COUNT,
     SYS_SERVICE_READY_COUNT,
@@ -201,6 +202,7 @@ class FDEntry:
     offset: int = 0
     path: str = ""
     tty_index: int = 0
+    pty_buffer: bytearray = field(default_factory=bytearray)
 
 
 @dataclass
@@ -334,7 +336,14 @@ class CLeonOSWineNative:
 
     @staticmethod
     def _clone_fd_entry(entry: FDEntry) -> FDEntry:
-        return FDEntry(kind=entry.kind, flags=int(entry.flags), offset=int(entry.offset), path=str(entry.path), tty_index=int(entry.tty_index))
+        return FDEntry(
+            kind=entry.kind,
+            flags=int(entry.flags),
+            offset=int(entry.offset),
+            path=str(entry.path),
+            tty_index=int(entry.tty_index),
+            pty_buffer=entry.pty_buffer,
+        )
 
     @staticmethod
     def _fd_access_mode(flags: int) -> int:
@@ -764,6 +773,8 @@ class CLeonOSWineNative:
             return self._fd_close(arg0)
         if sid == SYS_FD_DUP:
             return self._fd_dup(arg0)
+        if sid == SYS_PTY_OPEN:
+            return self._pty_open()
         if sid == SYS_DL_OPEN:
             return self._dl_open(uc, arg0)
         if sid == SYS_DL_CLOSE:
@@ -1716,6 +1727,15 @@ class CLeonOSWineNative:
         time.sleep(0)
         return self.state.timer_ticks()
 
+    def _pty_open(self) -> int:
+        fd_slot = self._fd_find_free()
+
+        if fd_slot < 0:
+            return u64_neg1()
+
+        self._fds[fd_slot] = FDEntry(kind="pty", flags=O_RDWR, offset=0, tty_index=self._tty_index)
+        return fd_slot
+
     def _fd_open(self, uc: Uc, path_ptr: int, flags: int, mode: int) -> int:
         _ = mode
         guest_path = self._normalize_guest_path(self._read_guest_cstring(uc, path_ptr, EXEC_PATH_MAX))
@@ -1812,6 +1832,10 @@ class CLeonOSWineNative:
             data = b"\x00" * req
         elif entry.kind == "dev_random":
             data = os.urandom(req)
+        elif entry.kind == "pty":
+            take = min(req, len(entry.pty_buffer))
+            data = bytes(entry.pty_buffer[:take])
+            del entry.pty_buffer[:take]
         elif entry.kind == "file":
             try:
                 with open(entry.path, "rb") as fh:
@@ -1857,6 +1881,13 @@ class CLeonOSWineNative:
             return len(data)
 
         if entry.kind in ("dev_null", "dev_zero", "dev_random"):
+            entry.offset += len(data)
+            return len(data)
+
+        if entry.kind == "pty":
+            entry.pty_buffer.extend(data)
+            if len(entry.pty_buffer) > 8192:
+                del entry.pty_buffer[: len(entry.pty_buffer) - 8192]
             entry.offset += len(data)
             return len(data)
 
