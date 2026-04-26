@@ -94,6 +94,9 @@ from .constants import (
     SYS_WM_SET_FOCUS,
     SYS_WM_SET_FLAGS,
     SYS_WM_RESIZE,
+    SYS_WM_COUNT,
+    SYS_WM_ID_AT,
+    SYS_WM_SNAPSHOT,
     SYS_GETPID,
     SYS_KERNEL_VERSION,
     SYS_KBD_BUFFERED,
@@ -859,6 +862,12 @@ class CLeonOSWineNative:
         if sid == SYS_WM_SET_FLAGS:
             return 0
         if sid == SYS_WM_RESIZE:
+            return 0
+        if sid == SYS_WM_COUNT:
+            return 0
+        if sid == SYS_WM_ID_AT:
+            return 0
+        if sid == SYS_WM_SNAPSHOT:
             return 0
 
         return u64_neg1()
