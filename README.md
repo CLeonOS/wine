@@ -41,7 +41,7 @@ python wine/cleonos_wine.py build/x86_64/ramdisk_root/shell/shell.elf --rootfs b
 - CLeonOS `int 0x80` syscall 0..94（含 `FD_*`、`DL_*`、`FB_*`、`PROC_*`、`STATS_*`、`EXEC_PATHV_IO`、`KERNEL_VERSION`、`DISK_*`）
 - TTY 输出与键盘输入队列
 - rootfs 文件/目录访问（`FS_*`）
-- `/temp` 与已挂载磁盘路径写入限制（`FS_MKDIR/WRITE/APPEND/REMOVE`）
+- rootfs 与已挂载磁盘路径写入（`FS_MKDIR/WRITE/APPEND/REMOVE`）；禁止根路径和动态 `/dev` 设备文件写入
 - `EXEC_PATH/EXEC_PATHV` 执行 ELF（带深度限制）
 - `EXEC_PATHV_IO`（支持 stdio fd 继承/重定向）
 - `SPAWN_PATH/SPAWN_PATHV/WAITPID/EXIT/SLEEP_TICKS/YIELD`

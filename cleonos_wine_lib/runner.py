@@ -1377,8 +1377,27 @@ class CLeonOSWineNative:
         return u64_neg1()
 
     @staticmethod
-    def _guest_path_is_under_temp(path: str) -> bool:
-        return path == "/temp" or path.startswith("/temp/")
+    def _guest_path_is_dynamic_dev_file(path: str) -> bool:
+        normalized = CLeonOSWineNative._normalize_guest_path(path)
+        return normalized in {
+            "/dev/fb0",
+            "/dev/net0",
+            "/dev/disk0",
+            "/dev/tty0",
+            "/dev/input/kbd",
+            "/dev/input/mouse",
+        }
+
+    @staticmethod
+    def _guest_path_is_writable_node(path: str) -> bool:
+        normalized = CLeonOSWineNative._normalize_guest_path(path)
+        if normalized == "/":
+            return False
+        if normalized == "/proc" or normalized.startswith("/proc/"):
+            return False
+        if CLeonOSWineNative._guest_path_is_dynamic_dev_file(normalized):
+            return False
+        return True
 
     def _disk_path_is_under_mount(self, path: str) -> bool:
         if not self._disk_mounted:
@@ -1515,10 +1534,9 @@ class CLeonOSWineNative:
 
     def _fs_mkdir(self, uc: Uc, path_ptr: int) -> int:
         path = self._normalize_guest_path(self._read_guest_cstring(uc, path_ptr))
-        is_temp_path = self._guest_path_is_under_temp(path)
         is_disk_path = self._disk_path_is_under_mount(path)
 
-        if not is_temp_path and not is_disk_path:
+        if not self._guest_path_is_writable_node(path):
             return 0
 
         if is_disk_path and not self._disk_formatted:
@@ -1539,17 +1557,16 @@ class CLeonOSWineNative:
 
     def _fs_write_common(self, uc: Uc, path_ptr: int, data_ptr: int, size: int, append_mode: bool) -> int:
         path = self._normalize_guest_path(self._read_guest_cstring(uc, path_ptr))
-        is_temp_path = self._guest_path_is_under_temp(path)
         is_disk_path = self._disk_path_is_under_mount(path)
         disk_mount = self._normalize_guest_path(self._disk_mount_path)
 
-        if not is_temp_path and not is_disk_path:
+        if not self._guest_path_is_writable_node(path):
             return 0
 
         if is_disk_path and not self._disk_formatted:
             return 0
 
-        if path == "/temp" or (is_disk_path and path == disk_mount):
+        if is_disk_path and path == disk_mount:
             return 0
 
         if size < 0 or size > self.state.fs_write_max:
@@ -1588,17 +1605,16 @@ class CLeonOSWineNative:
 
     def _fs_remove(self, uc: Uc, path_ptr: int) -> int:
         path = self._normalize_guest_path(self._read_guest_cstring(uc, path_ptr))
-        is_temp_path = self._guest_path_is_under_temp(path)
         is_disk_path = self._disk_path_is_under_mount(path)
         disk_mount = self._normalize_guest_path(self._disk_mount_path)
 
-        if not is_temp_path and not is_disk_path:
+        if not self._guest_path_is_writable_node(path):
             return 0
 
         if is_disk_path and not self._disk_formatted:
             return 0
 
-        if path == "/temp" or (is_disk_path and path == disk_mount):
+        if is_disk_path and path == disk_mount:
             return 0
 
         host_path = self._guest_to_host(path, must_exist=True)
