@@ -36,6 +36,11 @@ from .constants import (
     SYS_AUDIO_STOP,
     SYS_CONTEXT_SWITCHES,
     SYS_CUR_TASK,
+    SYS_DRIVER_COUNT,
+    SYS_DRIVER_INFO,
+    SYS_DRIVER_LOAD,
+    SYS_DRIVER_RELOAD,
+    SYS_DRIVER_UNLOAD,
     SYS_DL_CLOSE,
     SYS_DL_OPEN,
     SYS_DL_SYM,
@@ -210,6 +215,20 @@ class FDEntry:
 
 
 @dataclass
+class DriverEntry:
+    name: str
+    path: str
+    kind: int
+    state: int
+    driver_class: int
+    from_elf: int = 0
+    image_size: int = 0
+    elf_entry: int = 0
+    load_id: int = 0
+    owner_pid: int = 0
+
+
+@dataclass
 class DLImage:
     handle: int
     guest_path: str
@@ -239,6 +258,16 @@ FB_DEFAULT_WIDTH = 1280
 FB_DEFAULT_HEIGHT = 800
 FB_MAX_DIM = 4096
 FB_MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+STANDARD_ELF_DRIVERS: Tuple[Tuple[str, str, int], ...] = (
+    ("serial", "/driver/serialdrv.elf", 1),
+    ("framebuffer", "/driver/fbdrv.elf", 2),
+    ("tty", "/driver/ttydrv.elf", 3),
+    ("pcspeaker", "/driver/pcspeakerdrv.elf", 4),
+    ("disk", "/driver/diskdrv.elf", 5),
+    ("net0", "/driver/netdrv.elf", 6),
+    ("keyboard", "/driver/kbddrv.elf", 7),
+    ("mouse", "/driver/mousedrv.elf", 7),
+)
 
 
 class CLeonOSWineNative:
@@ -337,6 +366,7 @@ class CLeonOSWineNative:
 
         default_path = self._normalize_guest_path(self.guest_path_hint or f"/{self.elf_path.name}")
         self.argv_items, self.env_items = self._prepare_exec_items(default_path, self.argv_items, self.env_items)
+        self._driver_init_defaults()
         self._init_default_fds()
 
     @staticmethod
@@ -433,6 +463,168 @@ class CLeonOSWineNative:
     def _fb_mark_dirty(self) -> None:
         self._fb_dirty = True
         self._fb_present(force=False)
+
+    def _driver_init_defaults(self) -> None:
+        if self.state.drivers:
+            return
+
+        for load_id, (name, guest_path, driver_class) in enumerate(STANDARD_ELF_DRIVERS, start=1):
+            image_size = 0
+            elf_entry = 0
+            host_path = self._guest_to_host(guest_path, must_exist=True)
+
+            if host_path is not None and host_path.is_file():
+                try:
+                    data = host_path.read_bytes()
+                    elf = self._parse_elf_image_from_blob(data, require_entry=True)
+                    image_size = len(data)
+                    elf_entry = int(elf.entry)
+                except Exception:
+                    image_size = 0
+                    elf_entry = 0
+
+            self.state.drivers.append(
+                DriverEntry(
+                    name=name,
+                    path=guest_path,
+                    kind=2,
+                    state=3,
+                    driver_class=driver_class,
+                    from_elf=1,
+                    image_size=image_size,
+                    elf_entry=elf_entry,
+                    load_id=load_id,
+                    owner_pid=0,
+                )
+            )
+
+        self.state.driver_next_load_id = len(STANDARD_ELF_DRIVERS) + 1
+
+    @staticmethod
+    def _driver_metadata_for_path(guest_path: str) -> Tuple[str, int]:
+        base = guest_path.rstrip("/").split("/")[-1].lower()
+        if base == "serialdrv.elf":
+            return "serial", 1
+        if base in ("fbdrv.elf", "framebufferdrv.elf"):
+            return "framebuffer", 2
+        if base == "ttydrv.elf":
+            return "tty", 3
+        if base in ("pcspeakerdrv.elf", "audiodrv.elf"):
+            return "pcspeaker", 4
+        if base == "diskdrv.elf":
+            return "disk", 5
+        if base == "netdrv.elf":
+            return "net0", 6
+        if base in ("kbddrv.elf", "keyboarddrv.elf"):
+            return "keyboard", 7
+        if base == "mousedrv.elf":
+            return "mouse", 7
+        return guest_path.rstrip("/").split("/")[-1], 0
+
+    def _driver_find(self, name_or_path: str) -> Optional[DriverEntry]:
+        needle = self._normalize_guest_path(name_or_path) if name_or_path.startswith("/") else name_or_path
+        for entry in self.state.drivers:
+            if getattr(entry, "state", 0) == 4:
+                continue
+            if getattr(entry, "name", "") == needle or getattr(entry, "path", "") == needle:
+                return entry
+        return None
+
+    def _driver_count(self) -> int:
+        return len(self.state.drivers)
+
+    def _driver_info(self, uc: Uc, index: int, out_ptr: int, out_size: int) -> int:
+        if out_ptr == 0 or int(out_size) < 280:
+            return 0
+        if index < 0 or index >= len(self.state.drivers):
+            return 0
+
+        entry = self.state.drivers[int(index)]
+        name = getattr(entry, "name", "").encode("utf-8", errors="replace")[:31]
+        path = getattr(entry, "path", "").encode("utf-8", errors="replace")[:191]
+        blob = bytearray(280)
+        blob[0 : len(name)] = name
+        blob[32 : 32 + len(path)] = path
+        struct.pack_into(
+            "<QQQQQQQQ",
+            blob,
+            224,
+            int(getattr(entry, "kind", 0)),
+            int(getattr(entry, "state", 0)),
+            int(getattr(entry, "driver_class", 0)),
+            int(getattr(entry, "from_elf", 0)),
+            int(getattr(entry, "image_size", 0)),
+            int(getattr(entry, "elf_entry", 0)),
+            int(getattr(entry, "load_id", 0)),
+            int(getattr(entry, "owner_pid", 0)),
+        )
+        return 1 if self._write_guest_bytes(uc, int(out_ptr), bytes(blob)) else 0
+
+    def _driver_load(self, uc: Uc, path_ptr: int) -> int:
+        guest_path = self._normalize_guest_path(self._read_guest_cstring(uc, path_ptr, EXEC_PATH_MAX))
+        host_path = self._guest_to_host(guest_path, must_exist=True)
+        if host_path is None or not host_path.is_file() or not guest_path.lower().endswith(".elf"):
+            return 0
+        if self._driver_find(guest_path) is not None:
+            return 0
+
+        try:
+            data = host_path.read_bytes()
+            elf = self._parse_elf_image_from_blob(data, require_entry=True)
+        except Exception:
+            return 0
+
+        load_id = int(self.state.driver_next_load_id)
+        self.state.driver_next_load_id = int(u64(self.state.driver_next_load_id + 1)) or 1
+        name, driver_class = self._driver_metadata_for_path(guest_path)
+        self.state.drivers.append(
+            DriverEntry(
+                name=name,
+                path=guest_path,
+                kind=2,
+                state=3,
+                driver_class=driver_class,
+                from_elf=1,
+                image_size=len(data),
+                elf_entry=int(elf.entry),
+                load_id=load_id,
+                owner_pid=0,
+            )
+        )
+        return load_id
+
+    def _driver_unload(self, uc: Uc, name_ptr: int) -> int:
+        name_or_path = self._read_guest_cstring(uc, name_ptr, EXEC_PATH_MAX)
+        entry = self._driver_find(name_or_path)
+        if entry is None or int(getattr(entry, "from_elf", 0)) == 0:
+            return 0
+        entry.state = 4
+        return 1
+
+    def _driver_reload(self) -> int:
+        driver_dir = self._guest_to_host("/driver", must_exist=True)
+        loaded = 0
+        if driver_dir is None or not driver_dir.is_dir():
+            return 0
+        for item in sorted(driver_dir.iterdir(), key=lambda p: p.name.lower()):
+            if not item.is_file() or not item.name.lower().endswith(".elf"):
+                continue
+            guest = f"/driver/{item.name}"
+            if self._driver_find(guest) is not None:
+                continue
+            try:
+                data = item.read_bytes()
+                elf = self._parse_elf_image_from_blob(data, require_entry=True)
+            except Exception:
+                continue
+            load_id = int(self.state.driver_next_load_id)
+            self.state.driver_next_load_id = int(u64(self.state.driver_next_load_id + 1)) or 1
+            name, driver_class = self._driver_metadata_for_path(guest)
+            self.state.drivers.append(
+                DriverEntry(name, guest, 2, 3, driver_class, 1, len(data), int(elf.entry), load_id, 0)
+            )
+            loaded += 1
+        return loaded
 
     def _fb_hold_after_exit(self) -> None:
         end_ns: int
@@ -873,6 +1065,16 @@ class CLeonOSWineNative:
             return 0
         if sid == SYS_USER_HEAP_ALLOC:
             return self._user_heap_alloc(uc, arg0)
+        if sid == SYS_DRIVER_COUNT:
+            return self._driver_count()
+        if sid == SYS_DRIVER_INFO:
+            return self._driver_info(uc, arg0, arg1, arg2)
+        if sid == SYS_DRIVER_LOAD:
+            return self._driver_load(uc, arg0)
+        if sid == SYS_DRIVER_UNLOAD:
+            return self._driver_unload(uc, arg0)
+        if sid == SYS_DRIVER_RELOAD:
+            return self._driver_reload()
 
         return u64_neg1()
 
@@ -1784,8 +1986,8 @@ class CLeonOSWineNative:
         if fd_slot < 0:
             return u64_neg1()
 
-        if lower_path == "/dev/tty":
-            entry = FDEntry(kind="tty", flags=open_flags, offset=0, tty_index=self._tty_index)
+        if lower_path in ("/dev/tty", "/dev/tty0"):
+            entry = FDEntry(kind="tty", flags=open_flags, offset=0, tty_index=0 if lower_path == "/dev/tty0" else self._tty_index)
             self._fds[fd_slot] = entry
             return fd_slot
 
@@ -1801,6 +2003,11 @@ class CLeonOSWineNative:
 
         if lower_path == "/dev/random":
             entry = FDEntry(kind="dev_random", flags=open_flags, offset=0, tty_index=self._tty_index)
+            self._fds[fd_slot] = entry
+            return fd_slot
+
+        if lower_path in ("/dev/fb0", "/dev/net0", "/dev/disk0", "/dev/input/kbd", "/dev/input/mouse"):
+            entry = FDEntry(kind=lower_path[5:].replace("/", "_"), flags=open_flags, offset=0, tty_index=self._tty_index)
             self._fds[fd_slot] = entry
             return fd_slot
 
@@ -1859,6 +2066,33 @@ class CLeonOSWineNative:
             data = b"\x00" * req
         elif entry.kind == "dev_random":
             data = os.urandom(req)
+        elif entry.kind == "fb0":
+            data = (
+                f"available=1 width={self._fb_width} height={self._fb_height} "
+                f"pitch={self._fb_pitch} bpp={self._fb_bpp}\n"
+            ).encode()
+        elif entry.kind == "net0":
+            data = b"available=0 ipv4=0.0.0.0 netmask=0.0.0.0 gateway=0.0.0.0 dns=0.0.0.0\n"
+        elif entry.kind == "disk0":
+            data = (
+                f"present={1 if self._disk_present else 0} bytes={self._disk_size_bytes if self._disk_present else 0} "
+                f"sectors={(self._disk_size_bytes // 512) if self._disk_present else 0} "
+                f"fat32={1 if self._disk_formatted else 0} mounted={1 if self._disk_mounted else 0}\n"
+            ).encode()
+        elif entry.kind == "input_kbd":
+            out = bytearray()
+            while len(out) < req:
+                key = self.state.pop_key()
+                if key is None:
+                    break
+                out.append(key & 0xFF)
+            data = bytes(out)
+        elif entry.kind == "input_mouse":
+            data = (
+                f"ready={int(getattr(self.state, 'mouse_ready', 0))} x={int(getattr(self.state, 'mouse_x', 0))} "
+                f"y={int(getattr(self.state, 'mouse_y', 0))} buttons={int(getattr(self.state, 'mouse_buttons', 0))} "
+                f"packets={int(getattr(self.state, 'mouse_packet_count', 0))}\n"
+            ).encode()
         elif entry.kind == "pty":
             take = min(req, len(entry.pty_buffer))
             data = bytes(entry.pty_buffer[:take])
@@ -1910,6 +2144,28 @@ class CLeonOSWineNative:
         if entry.kind in ("dev_null", "dev_zero", "dev_random"):
             entry.offset += len(data)
             return len(data)
+
+        if entry.kind == "fb0":
+            text = data.decode("ascii", errors="ignore").strip().lower()
+            if text.startswith("clear "):
+                value = text[6:].strip().lstrip("#")
+                try:
+                    return self._fb_clear(int(value, 16))
+                except ValueError:
+                    return u64_neg1()
+            if len(data) == len(self._fb_pixels):
+                self._fb_pixels[:] = data
+                self._fb_mark_dirty()
+                entry.offset += len(data)
+                return len(data)
+            return u64_neg1()
+
+        if entry.kind == "net0":
+            entry.offset += len(data)
+            return len(data)
+
+        if entry.kind in ("input_kbd", "input_mouse", "disk0"):
+            return u64_neg1()
 
         if entry.kind == "pty":
             entry.pty_buffer.extend(data)

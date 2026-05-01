@@ -65,6 +65,10 @@ class SharedKernelState:
     proc_fault_error: Dict[int, int] = field(default_factory=dict)
     proc_fault_rip: Dict[int, int] = field(default_factory=dict)
 
+    # driver model
+    driver_next_load_id: int = 1
+    drivers: List[object] = field(default_factory=list)
+
     def timer_ticks(self) -> int:
         return (time.monotonic_ns() - self.start_ns) // 1_000_000
 
