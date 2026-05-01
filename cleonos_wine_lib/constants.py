@@ -134,6 +134,7 @@ SYS_PTY_OPEN = 116
 SYS_WM_COUNT = 117
 SYS_WM_ID_AT = 118
 SYS_WM_SNAPSHOT = 119
+SYS_USER_HEAP_ALLOC = 120
 
 # proc states (from cleonos/c/include/cleonos_syscall.h)
 PROC_STATE_UNUSED = 0

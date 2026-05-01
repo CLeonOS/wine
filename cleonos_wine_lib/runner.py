@@ -141,6 +141,7 @@ from .constants import (
     SYS_TTY_SWITCH,
     SYS_TTY_WRITE,
     SYS_TTY_WRITE_CHAR,
+    SYS_USER_HEAP_ALLOC,
     SYS_USER_EXEC_REQUESTED,
     SYS_USER_LAUNCH_FAIL,
     SYS_USER_LAUNCH_OK,
@@ -290,6 +291,7 @@ class CLeonOSWineNative:
         self._stack_base = 0x00007FFF00000000
         self._stack_size = 0x0000000000020000
         self._ret_sentinel = 0x00007FFF10000000
+        self._heap_next = 0x0000000200000000
         self._mapped_ranges: List[Tuple[int, int]] = []
         self._tty_index = int(self.state.tty_active)
         self._fds: Dict[int, FDEntry] = {}
@@ -869,8 +871,24 @@ class CLeonOSWineNative:
             return 0
         if sid == SYS_WM_SNAPSHOT:
             return 0
+        if sid == SYS_USER_HEAP_ALLOC:
+            return self._user_heap_alloc(uc, arg0)
 
         return u64_neg1()
+
+    def _user_heap_alloc(self, uc: Uc, size: int) -> int:
+        if size <= 0:
+            return 0
+
+        alloc_size = page_ceil(int(size))
+        if alloc_size <= 0 or alloc_size > (4 * 1024 * 1024):
+            return 0
+
+        addr = self._heap_next
+        self._heap_next = page_ceil(self._heap_next + alloc_size + PAGE_SIZE)
+        self._map_region(uc, addr, alloc_size, UC_PROT_READ | UC_PROT_WRITE)
+        self._mem_write(uc, addr, b"\x00" * min(alloc_size, PAGE_SIZE))
+        return addr
 
     def _host_write(self, text: str) -> None:
         if not text:
