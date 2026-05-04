@@ -70,6 +70,7 @@ from .constants import (
     SYS_FS_WRITE,
     SYS_DISK_FORMATTED,
     SYS_DISK_FORMAT_FAT32,
+    SYS_DISK_FSCK_FAT32,
     SYS_DISK_MOUNT,
     SYS_DISK_MOUNTED,
     SYS_DISK_MOUNT_PATH,
@@ -86,6 +87,7 @@ from .constants import (
     SYS_NET_PING,
     SYS_NET_TCP_CLOSE,
     SYS_NET_TCP_CONNECT,
+    SYS_NET_TCP_LAST_ERROR,
     SYS_NET_TCP_RECV,
     SYS_NET_TCP_SEND,
     SYS_NET_UDP_RECV,
@@ -110,6 +112,9 @@ from .constants import (
     SYS_KBD_HOTKEY_SWITCHES,
     SYS_KBD_POPPED,
     SYS_KBD_PUSHED,
+    SYS_KDBG_BT,
+    SYS_KDBG_REGS,
+    SYS_KDBG_SYM,
     SYS_KELF_COUNT,
     SYS_KELF_RUNS,
     SYS_LOG_JOURNAL_COUNT,
@@ -132,6 +137,7 @@ from .constants import (
     SYS_SERVICE_COUNT,
     SYS_SERVICE_READY_COUNT,
     SYS_SHUTDOWN,
+    SYS_SLEEP_MS,
     SYS_SLEEP_TICKS,
     SYS_SPAWN_PATH,
     SYS_SPAWN_PATHV,
@@ -139,21 +145,43 @@ from .constants import (
     SYS_STATS_RECENT_ID,
     SYS_STATS_RECENT_WINDOW,
     SYS_STATS_TOTAL,
+    SYS_SYSINFO,
     SYS_TASK_COUNT,
+    SYS_TIME_MS,
+    SYS_TIMER_HZ,
     SYS_TIMER_TICKS,
     SYS_TTY_ACTIVE,
     SYS_TTY_COUNT,
     SYS_TTY_SWITCH,
     SYS_TTY_WRITE,
     SYS_TTY_WRITE_CHAR,
+    SYS_USER_ADD,
+    SYS_USER_AT,
+    SYS_USER_COUNT,
+    SYS_USER_CURRENT,
     SYS_USER_HEAP_ALLOC,
     SYS_USER_EXEC_REQUESTED,
+    SYS_USER_IS_ADMIN,
     SYS_USER_LAUNCH_FAIL,
     SYS_USER_LAUNCH_OK,
     SYS_USER_LAUNCH_TRIES,
+    SYS_USER_LOGIN,
+    SYS_USER_LOGOUT,
+    SYS_USER_PASSWD,
+    SYS_USER_REMOVE,
+    SYS_USER_SET_ROLE,
     SYS_USER_SHELL_READY,
+    SYS_VM_ALLOC,
+    SYS_VM_FREE,
     SYS_WAITPID,
     SYS_YIELD,
+    SYSINFO_BOOT_MODE_MAX,
+    SYSINFO_TEXT_MAX,
+    USER_HOME_MAX,
+    USER_NAME_MAX,
+    VM_FLAG_EXEC,
+    VM_FLAG_READ,
+    VM_FLAG_WRITE,
     page_ceil,
     page_floor,
     u64,
@@ -249,11 +277,17 @@ EXEC_MAX_ENVS = 24
 EXEC_ITEM_MAX = 128
 EXEC_STATUS_SIGNAL_FLAG = 1 << 63
 PROC_PATH_MAX = 192
+PROC_SNAPSHOT_SIZE = 15 * 8 + PROC_PATH_MAX
+USER_INFO_SIZE = 4 * 8 + USER_NAME_MAX + USER_HOME_MAX
+DISK_FSCK_RESULT_SIZE = 10 * 8
+SYSINFO_SIZE = (SYSINFO_TEXT_MAX * 5) + SYSINFO_BOOT_MODE_MAX + (14 * 8)
 FD_MAX = 64
 DL_MAX_NAME = 192
 DL_MAX_SYMBOL = 128
 DL_BASE_START = 0x0000000100000000
 DL_BASE_GAP = 0x0000000000100000
+VM_BASE_START = 0x0000000300000000
+VM_MAX_ALLOC = 256 * 1024 * 1024
 FB_DEFAULT_WIDTH = 1280
 FB_DEFAULT_HEIGHT = 800
 FB_MAX_DIM = 4096
@@ -321,6 +355,8 @@ class CLeonOSWineNative:
         self._stack_size = 0x0000000000020000
         self._ret_sentinel = 0x00007FFF10000000
         self._heap_next = 0x0000000200000000
+        self._vm_next = VM_BASE_START
+        self._vm_allocs: Dict[int, int] = {}
         self._mapped_ranges: List[Tuple[int, int]] = []
         self._tty_index = int(self.state.tty_active)
         self._fds: Dict[int, FDEntry] = {}
@@ -807,6 +843,10 @@ class CLeonOSWineNative:
             return len(data)
         if sid == SYS_TIMER_TICKS:
             return self.state.timer_ticks()
+        if sid == SYS_TIMER_HZ:
+            return 1000
+        if sid == SYS_TIME_MS:
+            return self.state.timer_ticks()
         if sid == SYS_TASK_COUNT:
             return self.state.task_count
         if sid == SYS_CUR_TASK:
@@ -867,10 +907,18 @@ class CLeonOSWineNative:
             return self._proc_snapshot(uc, arg0, arg1, arg2)
         if sid == SYS_PROC_KILL:
             return self._proc_kill(uc, arg0, arg1)
+        if sid == SYS_KDBG_SYM:
+            return 0
+        if sid == SYS_KDBG_BT:
+            return 0
+        if sid == SYS_KDBG_REGS:
+            return 0
         if sid == SYS_EXIT:
             return self._request_exit(uc, arg0)
         if sid == SYS_SLEEP_TICKS:
             return self._sleep_ticks(arg0)
+        if sid == SYS_SLEEP_MS:
+            return self._sleep_ms(arg0)
         if sid == SYS_YIELD:
             return self._yield_once()
         if sid == SYS_AUDIO_AVAILABLE:
@@ -1015,6 +1063,10 @@ class CLeonOSWineNative:
             if sector_data is None:
                 return 0
             return 1 if self._disk_write_sector_raw(int(arg0), sector_data) else 0
+        if sid == SYS_DISK_FSCK_FAT32:
+            return self._disk_fsck_fat32(uc, arg0, arg1)
+        if sid == SYS_SYSINFO:
+            return self._sysinfo(uc, arg0, arg1)
         if sid == SYS_NET_AVAILABLE:
             return 0
         if sid == SYS_NET_IPV4_ADDR:
@@ -1038,6 +1090,8 @@ class CLeonOSWineNative:
         if sid == SYS_NET_TCP_RECV:
             return 0
         if sid == SYS_NET_TCP_CLOSE:
+            return 0
+        if sid == SYS_NET_TCP_LAST_ERROR:
             return 0
         if sid == SYS_MOUSE_STATE:
             return self._mouse_state(uc, arg0)
@@ -1065,6 +1119,30 @@ class CLeonOSWineNative:
             return 0
         if sid == SYS_USER_HEAP_ALLOC:
             return self._user_heap_alloc(uc, arg0)
+        if sid == SYS_VM_ALLOC:
+            return self._vm_alloc(uc, arg0, arg1)
+        if sid == SYS_VM_FREE:
+            return self._vm_free(uc, arg0, arg1)
+        if sid == SYS_USER_CURRENT:
+            return self._user_current(uc, arg0)
+        if sid == SYS_USER_LOGIN:
+            return self._user_login(uc, arg0)
+        if sid == SYS_USER_LOGOUT:
+            return self.state.user_logout()
+        if sid == SYS_USER_COUNT:
+            return self.state.user_count()
+        if sid == SYS_USER_AT:
+            return self._user_at(uc, arg0, arg1)
+        if sid == SYS_USER_ADD:
+            return self._user_add(uc, arg0)
+        if sid == SYS_USER_PASSWD:
+            return self._user_passwd(uc, arg0)
+        if sid == SYS_USER_SET_ROLE:
+            return self._user_set_role(uc, arg0, arg1)
+        if sid == SYS_USER_REMOVE:
+            return self._user_remove(uc, arg0)
+        if sid == SYS_USER_IS_ADMIN:
+            return self.state.user_is_admin()
         if sid == SYS_DRIVER_COUNT:
             return self._driver_count()
         if sid == SYS_DRIVER_INFO:
@@ -1091,6 +1169,59 @@ class CLeonOSWineNative:
         self._map_region(uc, addr, alloc_size, UC_PROT_READ | UC_PROT_WRITE)
         self._mem_write(uc, addr, b"\x00" * min(alloc_size, PAGE_SIZE))
         return addr
+
+    def _vm_alloc(self, uc: Uc, size: int, flags: int) -> int:
+        req_size = int(u64(size))
+        if req_size == 0:
+            return 0
+
+        alloc_size = page_ceil(req_size)
+        if alloc_size <= 0 or alloc_size > VM_MAX_ALLOC:
+            return 0
+
+        perms = 0
+        if int(flags) & VM_FLAG_READ:
+            perms |= UC_PROT_READ
+        if int(flags) & VM_FLAG_WRITE:
+            perms |= UC_PROT_WRITE
+        if int(flags) & VM_FLAG_EXEC:
+            perms |= UC_PROT_EXEC
+        if perms == 0:
+            perms = UC_PROT_READ | UC_PROT_WRITE
+
+        addr = self._vm_next
+        while self._range_overlaps_mapped(addr, addr + alloc_size):
+            addr = page_ceil(addr + alloc_size + PAGE_SIZE)
+
+        self._vm_next = page_ceil(addr + alloc_size + PAGE_SIZE)
+        try:
+            self._map_region(uc, addr, alloc_size, perms)
+        except Exception:
+            return 0
+
+        self._vm_allocs[addr] = alloc_size
+        if perms & UC_PROT_WRITE:
+            self._mem_write(uc, addr, b"\x00" * min(alloc_size, PAGE_SIZE))
+        return addr
+
+    def _vm_free(self, uc: Uc, addr: int, size: int) -> int:
+        start = page_floor(int(u64(addr)))
+        alloc_size = self._vm_allocs.get(start)
+
+        if start == 0 or alloc_size is None:
+            return 0
+
+        if int(u64(size)) != 0 and page_ceil(int(u64(size))) > alloc_size:
+            return 0
+
+        try:
+            uc.mem_unmap(start, alloc_size)
+        except Exception:
+            return 0
+
+        del self._vm_allocs[start]
+        self._mapped_ranges = [(ms, me) for (ms, me) in self._mapped_ranges if not (ms == start and me == start + alloc_size)]
+        return 1
 
     def _host_write(self, text: str) -> None:
         if not text:
@@ -1532,6 +1663,43 @@ class CLeonOSWineNative:
             payload = payload[:max_copy]
         return len(payload) if self._write_guest_bytes(uc, out_ptr, payload + b"\x00") else 0
 
+    def _disk_fsck_fat32(self, uc: Uc, flags: int, out_ptr: int) -> int:
+        _ = flags
+        if not self._disk_present or not self._disk_formatted:
+            return 0
+
+        sector_count = max(0, int(self._disk_size_bytes // 512))
+        checked_clusters = max(1, sector_count // 8)
+        used_bytes = 0
+        try:
+            for item in self._disk_root.rglob("*"):
+                if item.name in (self._disk_marker.name, self._disk_image_file.name):
+                    continue
+                if item.is_file():
+                    used_bytes += int(item.stat().st_size)
+        except Exception:
+            used_bytes = 0
+
+        used_clusters = min(checked_clusters, (used_bytes + 4095) // 4096)
+        free_clusters = checked_clusters - used_clusters if checked_clusters >= used_clusters else 0
+        result = struct.pack(
+            "<10Q",
+            1,
+            u64(checked_clusters),
+            u64(free_clusters),
+            u64(used_clusters),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+
+        if out_ptr != 0 and not self._write_guest_bytes(uc, int(out_ptr), result):
+            return 0
+        return 1
+
     def _fs_mkdir(self, uc: Uc, path_ptr: int) -> int:
         path = self._normalize_guest_path(self._read_guest_cstring(uc, path_ptr))
         is_disk_path = self._disk_path_is_under_mount(path)
@@ -1864,7 +2032,7 @@ class CLeonOSWineNative:
         return 1 if self._write_guest_bytes(uc, out_ptr, struct.pack("<Q", u64(pid))) else 0
 
     def _proc_snapshot(self, uc: Uc, pid: int, out_ptr: int, out_size: int) -> int:
-        if out_ptr == 0 or out_size < (13 * 8 + PROC_PATH_MAX):
+        if out_ptr == 0 or out_size < PROC_SNAPSHOT_SIZE:
             return 0
 
         target = int(pid)
@@ -1879,7 +2047,7 @@ class CLeonOSWineNative:
         path_buf = encoded_path + b"\x00" + (b"\x00" * (PROC_PATH_MAX - len(encoded_path) - 1))
 
         blob = struct.pack(
-            "<13Q",
+            "<15Q",
             u64(target),
             u64(self.state.proc_ppid(target)),
             u64(state_value),
@@ -1893,6 +2061,8 @@ class CLeonOSWineNative:
             u64(self.state.proc_fault_vector_value(target)),
             u64(self.state.proc_fault_error_value(target)),
             u64(self.state.proc_fault_rip_value(target)),
+            u64(self.state.proc_uid_value(target)),
+            u64(self.state.proc_role_value(target)),
         ) + path_buf
 
         return 1 if self._write_guest_bytes(uc, out_ptr, blob) else 0
@@ -1941,6 +2111,89 @@ class CLeonOSWineNative:
         self.state.mark_exited(target, status)
         return 1
 
+    @staticmethod
+    def _fixed_cstr(text: str, size: int) -> bytes:
+        if size <= 0:
+            return b""
+        payload = (text or "").encode("utf-8", errors="replace")
+        if len(payload) >= size:
+            payload = payload[: size - 1]
+        return payload + (b"\x00" * (size - len(payload)))
+
+    def _write_user_info(self, uc: Uc, out_ptr: int, info: Dict[str, object]) -> int:
+        if out_ptr == 0:
+            return 0
+
+        blob = bytearray(USER_INFO_SIZE)
+        struct.pack_into(
+            "<QQQQ",
+            blob,
+            0,
+            u64(int(info.get("uid", 0))),
+            u64(int(info.get("role", 0))),
+            u64(int(info.get("logged_in", 0))),
+            u64(int(info.get("disk_login_required", 0))),
+        )
+        blob[32 : 32 + USER_NAME_MAX] = self._fixed_cstr(str(info.get("name", "")), USER_NAME_MAX)
+        blob[32 + USER_NAME_MAX : 32 + USER_NAME_MAX + USER_HOME_MAX] = self._fixed_cstr(
+            str(info.get("home", "")),
+            USER_HOME_MAX,
+        )
+        return 1 if self._write_guest_bytes(uc, int(out_ptr), bytes(blob)) else 0
+
+    def _user_current(self, uc: Uc, out_ptr: int) -> int:
+        return self._write_user_info(uc, out_ptr, self.state.current_user_info())
+
+    def _user_login(self, uc: Uc, req_ptr: int) -> int:
+        req = self._read_guest_bytes_exact(uc, int(req_ptr), 24)
+        if req_ptr == 0 or req is None:
+            return 0
+
+        name_ptr, password_ptr, out_info_ptr = struct.unpack("<QQQ", req)
+        name = self._read_guest_cstring(uc, name_ptr, USER_NAME_MAX)
+        password = self._read_guest_cstring(uc, password_ptr, MAX_CSTR)
+        info = self.state.user_login(name, password)
+        if info is None:
+            return 0
+        if out_info_ptr != 0:
+            return self._write_user_info(uc, out_info_ptr, info)
+        return 1
+
+    def _user_at(self, uc: Uc, index: int, out_ptr: int) -> int:
+        info = self.state.user_at(int(index))
+        if info is None:
+            return 0
+        return self._write_user_info(uc, out_ptr, info)
+
+    def _user_add(self, uc: Uc, req_ptr: int) -> int:
+        req = self._read_guest_bytes_exact(uc, int(req_ptr), 24)
+        if req_ptr == 0 or req is None:
+            return 0
+
+        name_ptr, password_ptr, role = struct.unpack("<QQQ", req)
+        name = self._read_guest_cstring(uc, name_ptr, USER_NAME_MAX)
+        password = self._read_guest_cstring(uc, password_ptr, MAX_CSTR)
+        return self.state.user_add(name, password, role)
+
+    def _user_passwd(self, uc: Uc, req_ptr: int) -> int:
+        req = self._read_guest_bytes_exact(uc, int(req_ptr), 24)
+        if req_ptr == 0 or req is None:
+            return 0
+
+        name_ptr, old_password_ptr, new_password_ptr = struct.unpack("<QQQ", req)
+        name = self._read_guest_cstring(uc, name_ptr, USER_NAME_MAX)
+        old_password = self._read_guest_cstring(uc, old_password_ptr, MAX_CSTR)
+        new_password = self._read_guest_cstring(uc, new_password_ptr, MAX_CSTR)
+        return self.state.user_passwd(name, old_password, new_password)
+
+    def _user_set_role(self, uc: Uc, name_ptr: int, role: int) -> int:
+        name = self._read_guest_cstring(uc, name_ptr, USER_NAME_MAX)
+        return self.state.user_set_role(name, role)
+
+    def _user_remove(self, uc: Uc, name_ptr: int) -> int:
+        name = self._read_guest_cstring(uc, name_ptr, USER_NAME_MAX)
+        return self.state.user_remove(name)
+
     def _wait_pid(self, uc: Uc, pid: int, out_ptr: int) -> int:
         wait_ret, status = self.state.wait_pid(int(pid))
 
@@ -1966,6 +2219,15 @@ class CLeonOSWineNative:
         while (self.state.timer_ticks() - start) < ticks:
             time.sleep(0.001)
 
+        return self.state.timer_ticks() - start
+
+    def _sleep_ms(self, ms: int) -> int:
+        requested = int(u64(ms))
+        if requested == 0:
+            return 0
+
+        start = self.state.timer_ticks()
+        time.sleep(requested / 1000.0)
         return self.state.timer_ticks() - start
 
     def _yield_once(self) -> int:
@@ -2528,6 +2790,62 @@ class CLeonOSWineNative:
             return 0
 
         return len(payload)
+
+    def _sysinfo(self, uc: Uc, out_ptr: int, out_size: int) -> int:
+        if out_ptr == 0 or int(out_size) < SYSINFO_SIZE:
+            return 0
+
+        now = time.localtime()
+        uptime_ms = int(self.state.timer_ticks())
+        heap_used = 0
+        for start, end in self._mapped_ranges:
+            if start >= 0x0000000200000000:
+                heap_used += max(0, end - start)
+
+        heap_total = 128 * 1024 * 1024
+        if heap_used > heap_total:
+            heap_total = page_ceil(heap_used)
+        heap_free = heap_total - heap_used if heap_total >= heap_used else 0
+        managed_pages = max(1, int(self._disk_size_bytes // PAGE_SIZE))
+        used_pages = min(managed_pages, max(1, heap_used // PAGE_SIZE))
+        free_pages = managed_pages - used_pages if managed_pages >= used_pages else 0
+
+        blob = bytearray(SYSINFO_SIZE)
+        offset = 0
+        for text in (
+            "CLeonKernelSystem",
+            CLKS_VERSION_STRING,
+            "x86_64",
+            time.strftime("%Y-%m-%d", now),
+            time.strftime("%H:%M:%S", now),
+        ):
+            blob[offset : offset + SYSINFO_TEXT_MAX] = self._fixed_cstr(text, SYSINFO_TEXT_MAX)
+            offset += SYSINFO_TEXT_MAX
+
+        boot_mode = "wine-disk" if self._disk_mounted else "wine"
+        blob[offset : offset + SYSINFO_BOOT_MODE_MAX] = self._fixed_cstr(boot_mode, SYSINFO_BOOT_MODE_MAX)
+        offset += SYSINFO_BOOT_MODE_MAX
+
+        struct.pack_into(
+            "<14Q",
+            blob,
+            offset,
+            u64(uptime_ms),
+            u64(uptime_ms),
+            1000,
+            u64(managed_pages),
+            u64(free_pages),
+            u64(used_pages),
+            0,
+            u64(heap_total),
+            u64(heap_used),
+            u64(heap_free),
+            u64(self._fs_node_count()),
+            u64(self.state.proc_count()),
+            u64(self.state.service_count),
+            u64(self.state.service_ready),
+        )
+        return 1 if self._write_guest_bytes(uc, int(out_ptr), bytes(blob)) else 0
 
     def _fb_info(self, uc: Uc, out_ptr: int) -> int:
         if out_ptr == 0:

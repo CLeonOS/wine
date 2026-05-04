@@ -6,7 +6,39 @@ import time
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
 
-from .constants import PROC_STATE_EXITED, PROC_STATE_PENDING, PROC_STATE_RUNNING, PROC_STATE_STOPPED, u64
+from .constants import (
+    PROC_STATE_EXITED,
+    PROC_STATE_PENDING,
+    PROC_STATE_RUNNING,
+    PROC_STATE_STOPPED,
+    USER_ROLE_ADMIN,
+    USER_ROLE_USER,
+    USER_UID_BASE,
+    USER_UID_NOBODY,
+    USER_UID_ROOT,
+    u64,
+)
+
+
+@dataclass
+class UserAccount:
+    uid: int
+    name: str
+    password: str
+    role: int
+    home: str
+
+
+def _default_users() -> Dict[str, UserAccount]:
+    return {
+        "root": UserAccount(
+            uid=USER_UID_ROOT,
+            name="root",
+            password="root",
+            role=USER_ROLE_ADMIN,
+            home="/root",
+        )
+    }
 
 
 @dataclass
@@ -64,10 +96,20 @@ class SharedKernelState:
     proc_fault_vector: Dict[int, int] = field(default_factory=dict)
     proc_fault_error: Dict[int, int] = field(default_factory=dict)
     proc_fault_rip: Dict[int, int] = field(default_factory=dict)
+    proc_uid: Dict[int, int] = field(default_factory=dict)
+    proc_role: Dict[int, int] = field(default_factory=dict)
 
     # driver model
     driver_next_load_id: int = 1
     drivers: List[object] = field(default_factory=list)
+
+    # user database. Wine defaults to root for compatibility with existing rootfs images.
+    user_lock: threading.Lock = field(default_factory=threading.Lock)
+    users: Dict[str, UserAccount] = field(default_factory=_default_users)
+    user_order: List[str] = field(default_factory=lambda: ["root"])
+    current_user_name: str = "root"
+    user_next_uid: int = USER_UID_BASE
+    disk_login_required: int = 0
 
     def timer_ticks(self) -> int:
         return (time.monotonic_ns() - self.start_ns) // 1_000_000
@@ -139,6 +181,7 @@ class SharedKernelState:
 
     def alloc_pid(self, ppid: int) -> int:
         now = self.timer_ticks()
+        current_user = self.current_user_info()
 
         with self.proc_lock:
             pid = int(self.proc_next_pid)
@@ -165,6 +208,8 @@ class SharedKernelState:
             self.proc_fault_vector[pid] = 0
             self.proc_fault_error[pid] = 0
             self.proc_fault_rip[pid] = 0
+            self.proc_uid[pid] = int(current_user["uid"])
+            self.proc_role[pid] = int(current_user["role"])
             return pid
 
     def set_current_pid(self, pid: int) -> None:
@@ -356,3 +401,170 @@ class SharedKernelState:
     def proc_fault_rip_value(self, pid: int) -> int:
         with self.proc_lock:
             return int(self.proc_fault_rip.get(int(pid), 0))
+
+    def proc_uid_value(self, pid: int) -> int:
+        with self.proc_lock:
+            return int(self.proc_uid.get(int(pid), USER_UID_NOBODY))
+
+    def proc_role_value(self, pid: int) -> int:
+        with self.proc_lock:
+            return int(self.proc_role.get(int(pid), USER_ROLE_USER))
+
+    @staticmethod
+    def _valid_user_name(name: str) -> bool:
+        if not name or len(name.encode("utf-8", errors="ignore")) >= 32:
+            return False
+
+        for ch in name:
+            if ch.isalnum() or ch in ("_", "-", "."):
+                continue
+            return False
+        return True
+
+    @staticmethod
+    def _home_for_user(name: str) -> str:
+        return "/root" if name == "root" else f"/home/{name}"
+
+    def _account_info(self, account: UserAccount, logged_in: bool) -> Dict[str, object]:
+        return {
+            "uid": int(account.uid),
+            "role": int(account.role),
+            "logged_in": 1 if logged_in else 0,
+            "disk_login_required": int(self.disk_login_required),
+            "name": str(account.name),
+            "home": str(account.home),
+        }
+
+    def _nobody_info(self) -> Dict[str, object]:
+        return {
+            "uid": USER_UID_NOBODY,
+            "role": USER_ROLE_USER,
+            "logged_in": 0,
+            "disk_login_required": int(self.disk_login_required),
+            "name": "nobody",
+            "home": "/",
+        }
+
+    def current_user_info(self) -> Dict[str, object]:
+        with self.user_lock:
+            account = self.users.get(self.current_user_name)
+            if account is None:
+                return self._nobody_info()
+            return self._account_info(account, True)
+
+    def user_login(self, name: str, password: str) -> Optional[Dict[str, object]]:
+        clean_name = (name or "").strip()
+        clean_password = password or ""
+
+        with self.user_lock:
+            account = self.users.get(clean_name)
+            if account is None:
+                return None
+            if account.password != clean_password:
+                return None
+            self.current_user_name = clean_name
+            return self._account_info(account, True)
+
+    def user_logout(self) -> int:
+        with self.user_lock:
+            self.current_user_name = ""
+        return 1
+
+    def user_count(self) -> int:
+        with self.user_lock:
+            return len(self.user_order)
+
+    def user_at(self, index: int) -> Optional[Dict[str, object]]:
+        with self.user_lock:
+            if index < 0 or index >= len(self.user_order):
+                return None
+            name = self.user_order[index]
+            account = self.users.get(name)
+            if account is None:
+                return None
+            return self._account_info(account, name == self.current_user_name)
+
+    def user_add(self, name: str, password: str, role: int) -> int:
+        clean_name = (name or "").strip()
+        if not self._valid_user_name(clean_name):
+            return 0
+
+        with self.user_lock:
+            current = self.users.get(self.current_user_name)
+            if current is None or int(current.role) != USER_ROLE_ADMIN:
+                return 0
+            if clean_name in self.users:
+                return 0
+
+            uid = int(self.user_next_uid)
+            self.user_next_uid = int(u64(self.user_next_uid + 1))
+            if self.user_next_uid < USER_UID_BASE:
+                self.user_next_uid = USER_UID_BASE
+
+            effective_role = USER_ROLE_ADMIN if int(role) == USER_ROLE_ADMIN else USER_ROLE_USER
+            self.users[clean_name] = UserAccount(
+                uid=uid,
+                name=clean_name,
+                password=password or "",
+                role=effective_role,
+                home=self._home_for_user(clean_name),
+            )
+            self.user_order.append(clean_name)
+            return 1
+
+    def user_passwd(self, name: str, old_password: str, new_password: str) -> int:
+        clean_name = (name or "").strip()
+
+        with self.user_lock:
+            current = self.users.get(self.current_user_name)
+            target = self.users.get(clean_name)
+            if current is None or target is None:
+                return 0
+
+            is_admin = int(current.role) == USER_ROLE_ADMIN
+            is_self = current.name == target.name
+            if not is_admin and not is_self:
+                return 0
+            if not is_admin and target.password != (old_password or ""):
+                return 0
+
+            target.password = new_password or ""
+            return 1
+
+    def user_set_role(self, name: str, role: int) -> int:
+        clean_name = (name or "").strip()
+
+        with self.user_lock:
+            current = self.users.get(self.current_user_name)
+            target = self.users.get(clean_name)
+            if current is None or target is None:
+                return 0
+            if int(current.role) != USER_ROLE_ADMIN:
+                return 0
+            if target.uid == USER_UID_ROOT and int(role) != USER_ROLE_ADMIN:
+                return 0
+
+            target.role = USER_ROLE_ADMIN if int(role) == USER_ROLE_ADMIN else USER_ROLE_USER
+            return 1
+
+    def user_remove(self, name: str) -> int:
+        clean_name = (name or "").strip()
+
+        with self.user_lock:
+            current = self.users.get(self.current_user_name)
+            target = self.users.get(clean_name)
+            if current is None or target is None:
+                return 0
+            if int(current.role) != USER_ROLE_ADMIN:
+                return 0
+            if target.uid == USER_UID_ROOT or clean_name == self.current_user_name:
+                return 0
+
+            del self.users[clean_name]
+            self.user_order = [item for item in self.user_order if item != clean_name]
+            return 1
+
+    def user_is_admin(self) -> int:
+        with self.user_lock:
+            current = self.users.get(self.current_user_name)
+            return 1 if current is not None and int(current.role) == USER_ROLE_ADMIN else 0
