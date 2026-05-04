@@ -70,6 +70,7 @@ class SharedKernelState:
     log_journal_cap: int = 256
     log_journal: Deque[str] = field(default_factory=lambda: collections.deque(maxlen=256))
     fs_write_max: int = 16 * 1024 * 1024
+    locale: str = "en_US.UTF-8"
 
     # syscall stats
     stats_lock: threading.Lock = field(default_factory=threading.Lock)

@@ -14,6 +14,7 @@ from .constants import (
     DEFAULT_MAX_EXEC_DEPTH,
     FD_INHERIT,
     FS_NAME_MAX,
+    LOCALE_TEXT_MAX,
     MAX_CSTR,
     MAX_IO_READ,
     O_APPEND,
@@ -106,6 +107,8 @@ from .constants import (
     SYS_WM_SNAPSHOT,
     SYS_GETPID,
     SYS_KERNEL_VERSION,
+    SYS_LOCALE_GET,
+    SYS_LOCALE_SET,
     SYS_KBD_BUFFERED,
     SYS_KBD_DROPPED,
     SYS_KBD_GET_CHAR,
@@ -1067,6 +1070,10 @@ class CLeonOSWineNative:
             return self._disk_fsck_fat32(uc, arg0, arg1)
         if sid == SYS_SYSINFO:
             return self._sysinfo(uc, arg0, arg1)
+        if sid == SYS_LOCALE_GET:
+            return self._locale_get(uc, arg0, arg1)
+        if sid == SYS_LOCALE_SET:
+            return self._locale_set(uc, arg0)
         if sid == SYS_NET_AVAILABLE:
             return 0
         if sid == SYS_NET_IPV4_ADDR:
@@ -2846,6 +2853,37 @@ class CLeonOSWineNative:
             u64(self.state.service_ready),
         )
         return 1 if self._write_guest_bytes(uc, int(out_ptr), bytes(blob)) else 0
+
+    @staticmethod
+    def _locale_valid(text: str) -> bool:
+        payload = (text or "").encode("utf-8", errors="ignore")
+        if not payload or len(payload) >= LOCALE_TEXT_MAX:
+            return False
+
+        for ch in text:
+            if ("a" <= ch <= "z") or ("A" <= ch <= "Z") or ("0" <= ch <= "9") or ch in ("_", "-", "."):
+                continue
+            return False
+        return True
+
+    def _locale_get(self, uc: Uc, out_ptr: int, out_size: int) -> int:
+        if out_ptr == 0 or out_size == 0:
+            return 0
+
+        payload = (self.state.locale or "en_US.UTF-8").encode("utf-8", errors="replace")
+        max_copy = max(0, int(out_size) - 1)
+        if len(payload) > max_copy:
+            payload = payload[:max_copy]
+
+        return len(payload) if self._write_guest_bytes(uc, int(out_ptr), payload + b"\x00") else 0
+
+    def _locale_set(self, uc: Uc, locale_ptr: int) -> int:
+        locale = self._read_guest_cstring(uc, locale_ptr, LOCALE_TEXT_MAX)
+        if not self._locale_valid(locale):
+            return 0
+
+        self.state.locale = locale
+        return 1
 
     def _fb_info(self, uc: Uc, out_ptr: int) -> int:
         if out_ptr == 0:
